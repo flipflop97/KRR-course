@@ -43,9 +43,9 @@ def build_translation(planning_problem:PlanningProblem):
         
         if name not in trans:
             if name[0].isupper():
-                trans[name] = "_" + name.lower()
+                trans[name] = "atom_" + name
             else:
-                trans[name] = "_" + name.upper()
+                trans[name] = "VAR_" + name
         
         for arg in exp.args:
             recurse(arg)
@@ -104,17 +104,19 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
 
 
     for action in planning_problem.actions:
+        # TODO negations
         preconds = ", ".join([f"state(T-1, {precond})" for precond in (action.precond)] + ["time(T)"])
         asp_code += f"available(T, {action}) :- {preconds}.\n"
 
-        effects = ", ".join(
-            [f"not state(T, {str(effect)[1:]})" for effect in action.effect if effect.op == "~"] +
-            [f"state(T, {effect})" for effect in action.effect if effect.op != "~"])
-
-        asp_code += f"{effects} :- chosen(T, {action}).\n"
+        effects = ", ".join(f"state(T, {effect})" for effect in action.effect if effect.op != "~")
+        #[f"not state(T, {str(effect)[1:]})" for effect in action.effect if effect.op == "~"]
+            
+        asp_code += f"{effects} :- chosen(T, {action}), time(T).\n"
     
+    # TODO Except if negated by effetcts
     asp_code += "state(T, E) :- state(T-1, E), time(T).\n"
-    asp_code += "1 { chosen(T, A) : available(T, A) } 1 :- time(T).\n"
+
+    asp_code += "1 { chosen(T, A) : available(T, A) } 1 :- time(T), busy(T-1).\n"
 
     for goal in planning_problem.goals:
         #asp_code += f":- not state(t_max, {goal}).\n"
@@ -122,12 +124,17 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
 
     asp_code += ":- not state(t_max, G), goal(G).\n"
 
-    #asp_code += "#minimize { T, state(T, G) : goal(G), time(T) }.\n"
+    #asp_code += "1 { final(T, G) : time(T), state(T, G) } 1 :- goal(G).\n"
+    #asp_code += "T==T :- final(T, G).\n"
+    #asp_code += "#minimize { T, final(T, G) : final(T, G) }.\n"
+    #asp_code += "#minimize { T, state(T, G) : state(T, G), goal(G) }.\n"
 
-    asp_code += "{ test(state(T, G)) : goal(G), time(T) }.\n"
-    asp_code += "#show test/1.\n"
+    asp_code += "busy(T) :- not state(T, G), goal(G), time(T).\n"
+    asp_code += "done(T) :- not busy(T), time(T).\n"
+    asp_code += "1 { firstdone(T) : done(T) } 1.\n"
 
-    asp_code += "#show chosen/2.\n"
+    asp_code += "#minimize { T, firstdone(T) : firstdone(T) }.\n"
+    #asp_code += "#show chosen/2.\n"
 
     print(asp_code)
 
@@ -135,12 +142,14 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
     control.add("base", [], asp_code)
     control.ground([("base", [])])
     control.configuration.solve.models = 1
+    control.configuration.solve.opt_mode = "optN"
 
     plan = None
     with control.solve(yield_=True) as handle:
         for model in handle:
-            for item in model.symbols(shown=True):
-                print(item)
-            plan = [expr(trans_rev[str(action)]) for _, action in sorted(action.arguments for action in model.symbols(shown=True))]
+            if model.optimality_proven == True:
+                for item in model.symbols(shown=True):
+                    print(item)
+                plan = [expr(str(action).replace("atom_", "")) for _, action in sorted(action.arguments for action in model.symbols(shown=True))]
 
     return plan
