@@ -91,65 +91,69 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
 
     # Create translation and inverse translation to support clingo's capital use case
     trans = build_translation(planning_problem)
-    trans_rev = {val: key for key, val in trans.items()}
     translate(planning_problem, trans)
 
-    asp_code = f"#const t_max={t_max}.\n"
-
     # Define timesteps
+    asp_code = f"#const t_max={t_max}.\n"
     asp_code += "time(0..t_max).\n"
 
+    # Add initial states
     for initial in planning_problem.initial:
         asp_code += f"state(0, {initial}).\n"
 
-
     for action in planning_problem.actions:
-        # TODO negations
-        preconds = ", ".join([f"state(T-1, {precond})" for precond in (action.precond)] + ["time(T)"])
+        # List actions that are available regarding preconditions
+        preconds = ", ".join([   
+            f"not state(T-1, {precond.args})"
+            if precond.op == "~" else
+            f"state(T-1, {precond})"
+            for precond in action.precond
+        ] + ["time(T)"])
         asp_code += f"available(T, {action}) :- {preconds}.\n"
 
+        # Add action effects if one is chosen
         effects = ", ".join(f"state(T, {effect})" for effect in action.effect if effect.op != "~")
-        #[f"not state(T, {str(effect)[1:]})" for effect in action.effect if effect.op == "~"]
-            
+        #[f"not state(T, {effect.args})" for effect in action.effect if effect.op == "~"]
         asp_code += f"{effects} :- chosen(T, {action}), time(T).\n"
     
-    # TODO Except if negated by effetcts
-    asp_code += "state(T, E) :- state(T-1, E), time(T).\n"
-
-    asp_code += "1 { chosen(T, A) : available(T, A) } 1 :- time(T), busy(T-1).\n"
-
+    # Add goals
     for goal in planning_problem.goals:
-        #asp_code += f":- not state(t_max, {goal}).\n"
         asp_code += f"goal({goal}).\n"
 
+    # Inherit previous states
+    # TODO Except if negated by effects
+    asp_code += "state(T, E) :- state(T-1, E), time(T).\n"
+
+    # One action can be taken at a timestep if still busy
+    asp_code += "1 { chosen(T, A) : available(T, A) } 1 :- time(T), busy(T-1).\n"
+
+    # Require goals to be met before t_max
     asp_code += ":- not state(t_max, G), goal(G).\n"
 
-    #asp_code += "1 { final(T, G) : time(T), state(T, G) } 1 :- goal(G).\n"
-    #asp_code += "T==T :- final(T, G).\n"
-    #asp_code += "#minimize { T, final(T, G) : final(T, G) }.\n"
-    #asp_code += "#minimize { T, state(T, G) : state(T, G), goal(G) }.\n"
-
+    # Define when the problem is solved
     asp_code += "busy(T) :- not state(T, G), goal(G), time(T).\n"
-    asp_code += "done(T) :- not busy(T), time(T).\n"
-    asp_code += "1 { firstdone(T) : done(T) } 1.\n"
+    asp_code += "1 { done(T) : not busy(T), time(T) } 1.\n"
 
-    asp_code += "#minimize { T, firstdone(T) : firstdone(T) }.\n"
-    #asp_code += "#show chosen/2.\n"
+    # Configure optimization and output
+    asp_code += "#minimize { T, done(T) : done(T) }.\n"
+    asp_code += "#show chosen/2.\n"
 
-    print(asp_code)
+    #print(asp_code)
 
+    # Configure clingo to find 1 optimal model
     control = clingo.Control()
     control.add("base", [], asp_code)
     control.ground([("base", [])])
     control.configuration.solve.models = 1
     control.configuration.solve.opt_mode = "optN"
 
+    # Retrieve the solution as a plan
     plan = None
     with control.solve(yield_=True) as handle:
         for model in handle:
             if model.optimality_proven == True:
-                for item in model.symbols(shown=True):
-                    print(item)
+                #for item in model.symbols(shown=True):
+                #    print(item)
                 plan = [expr(str(action).replace("atom_", "")) for _, action in sorted(action.arguments for action in model.symbols(shown=True))]
 
     return plan
