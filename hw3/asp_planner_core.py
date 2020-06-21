@@ -43,7 +43,10 @@ def build_translation(planning_problem:PlanningProblem):
         
         if name not in trans:
             if name[0].isupper():
-                trans[name] = "atom_" + name
+                if len(exp.args):
+                    trans[name] = "prop_" + name
+                else:
+                    trans[name] = "unit_" + name
             else:
                 trans[name] = "VAR_" + name
         
@@ -91,11 +94,17 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
 
     # Create translation and inverse translation to support clingo's capital use case
     trans = build_translation(planning_problem)
+    trans_inv = {val: key for key, val in trans.items()}
     translate(planning_problem, trans)
 
     # Define timesteps
     asp_code = f"#const t_max={t_max}.\n"
     asp_code += "time(0..t_max).\n"
+
+    # Add all units to check for if a goal contains a variable
+    for _, unit in trans.items():
+        if unit.startswith("unit_"):
+            asp_code += f"unit({unit}).\n"
 
     # Add initial states
     for initial in planning_problem.initial:
@@ -112,17 +121,25 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
         asp_code += f"available(T, {action}) :- {preconds}.\n"
 
         # Add action effects if one is chosen
-        effects = ", ".join(f"state(T, {effect})" for effect in action.effect if effect.op != "~")
-        #[f"not state(T, {effect.args})" for effect in action.effect if effect.op == "~"]
-        asp_code += f"{effects} :- chosen(T, {action}), time(T).\n"
-    
-    # Add goals
-    for goal in planning_problem.goals:
-        asp_code += f"goal({goal}).\n"
+        for effect in action.effect:
+            if effect.op != "~":
+                asp_code += f"state(T, {effect}) :- chosen(T, {action}), time(T).\n"
 
-    # Inherit previous states
-    # TODO Except if negated by effects
-    asp_code += "state(T, E) :- state(T-1, E), time(T).\n"
+        # Forbid negated effects by an action
+        for effect in action.effect:
+            if effect.op == "~":
+                asp_code += f"forbidden(T, {str(effect)[1:]}) :- chosen(T, {action}), time(T).\n"
+    
+    # Add goals, adding unit constraints if a variable is present inside
+    for goal in planning_problem.goals:
+        units = ", ".join(f"unit({var})" for var in goal.args if str(var).startswith("VAR_"))
+        if units:
+            asp_code += f"goal({goal}) :- {units}.\n"
+        else:
+            asp_code += f"goal({goal}).\n"
+
+    # Inherit previous states except if forbidden
+    asp_code += "state(T, E) :- state(T-1, E), time(T), not forbidden(T, E).\n"
 
     # One action can be taken at a timestep if still busy
     asp_code += "1 { chosen(T, A) : available(T, A) } 1 :- time(T), busy(T-1).\n"
@@ -138,8 +155,6 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
     asp_code += "#minimize { T, done(T) : done(T) }.\n"
     asp_code += "#show chosen/2.\n"
 
-    #print(asp_code)
-
     # Configure clingo to find 1 optimal model
     control = clingo.Control()
     control.add("base", [], asp_code)
@@ -152,8 +167,13 @@ def solve_planning_problem_using_ASP(planning_problem:PlanningProblem, t_max:int
     with control.solve(yield_=True) as handle:
         for model in handle:
             if model.optimality_proven == True:
-                #for item in model.symbols(shown=True):
-                #    print(item)
-                plan = [expr(str(action).replace("atom_", "")) for _, action in sorted(action.arguments for action in model.symbols(shown=True))]
+                # Retrieve actions and translate them back
+                plan = [
+                    expr(str(action).replace("prop_", "").replace("unit_", "").replace("VAR_", ""))
+                    for _, action in sorted(action.arguments for action in model.symbols(shown=True))
+                ]
+
+    # Undo translation changes to model
+    translate(planning_problem, trans_inv)
 
     return plan
